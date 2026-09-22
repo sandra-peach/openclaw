@@ -1,0 +1,102 @@
+name: PR 154073 macOS test app
+
+on:
+  push:
+    branches:
+      - build/pr-154073-macos-app
+    paths:
+      - .github/workflows/pr-154073-macos-test-app.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-154073-macos-test-app
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PR_HEAD_SHA: ff936736514ed5974770645f077cc8d96a6bb4cf
+
+jobs:
+  build:
+    name: Build ad-hoc universal app
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact reviewed PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.PR_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Verify source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          test "$(git status --porcelain)" = ""
+
+      - name: Setup Node and dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.19.0"
+          install-bun: "false"
+          cache-mode: "off"
+
+      - name: Build test app
+        shell: bash
+        env:
+          ALLOW_ADHOC_SIGNING: "1"
+          APP_VERSION: "2026.9.5"
+          BUILD_ARCHS: "arm64 x86_64"
+          BUNDLE_ID: ai.openclaw.mac.pr154073.debug
+          OPENCLAW_SKIP_MLX_TTS: "1"
+          SIGN_IDENTITY: "-"
+          SKIP_PNPM_INSTALL: "1"
+        run: |
+          set -euo pipefail
+          /bin/bash scripts/package-mac-app.sh
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=dist/OpenClaw.app
+          plist="$app/Contents/Info.plist"
+          test -d "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :OpenClawGitCommit' "$plist")" = "$PR_HEAD_SHA"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "ai.openclaw.mac.pr154073.debug"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$plist")" = "false"
+          /usr/bin/codesign --verify --deep --strict "$app"
+          /usr/bin/lipo -archs "$app/Contents/MacOS/OpenClaw" | /usr/bin/grep -F arm64
+          /usr/bin/lipo -archs "$app/Contents/MacOS/OpenClaw" | /usr/bin/grep -F x86_64
+
+          artifact="OpenClaw-pr154073-ff93673651-universal.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app" "$artifact"
+          /usr/bin/shasum -a 256 "$artifact" > "$artifact.sha256"
+
+          {
+            echo "source_sha=$PR_HEAD_SHA"
+            echo "bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")"
+            echo "version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+            echo "build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+            echo "architectures=$(/usr/bin/lipo -archs "$app/Contents/MacOS/OpenClaw")"
+            echo "automatic_updates=$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$plist")"
+            /usr/bin/xcodebuild -version
+            /usr/bin/swift --version
+            /usr/bin/codesign -dvv "$app" 2>&1
+          } > pr-154073-build-report.txt
+
+      - name: Upload test app
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: OpenClaw-pr154073-ff93673651-universal
+          path: |
+            OpenClaw-pr154073-ff93673651-universal.zip
+            OpenClaw-pr154073-ff93673651-universal.zip.sha256
+            pr-154073-build-report.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
